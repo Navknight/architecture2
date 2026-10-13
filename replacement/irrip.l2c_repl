@@ -23,7 +23,7 @@ uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
     // look for the maxRRPV line
     while (1)
     {
-        uint8_t instr_candidate = -1;
+        int8_t instr_candidate = -1;
 
         for (int i=0; i<L2C_WAY; i++) {
             if (l2_rrpv[set][i] == maxRRPV) {
@@ -81,16 +81,17 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
     // cout << hex << " paddr: " << setw(12) << paddr << " ip: " << setw(8) << ip << " victim_addr: " << victim_addr << dec << endl;
 
     // Changing the policy to be very forgiving to the Instruction Lines. Will have to test the "gradually" promoting the data line
-    if (hit)
+    if (hit) {
         if (isInstruction) {
             l2_is_instr[set][way] = 1;
             l2_rrpv[set][way] = 0;
         } else if (l2_rrpv[set][way] > 0) {
             l2_rrpv[set][way]--;
         }
-    else
+    } else {
         l2_is_instr[set][way] = (isInstruction) ? 1 : 0;
         l2_rrpv[set][way] = (isInstruction) ? 0 : maxRRPV-1;  //insert with RRPV2
+        }
 }
 
 // use this function to print out your own stats at the end of simulation
