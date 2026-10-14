@@ -4,10 +4,36 @@
 uint32_t l2_rrpv[L2C_SET][L2C_WAY];
 uint8_t l2_is_instr[L2C_SET][L2C_WAY]; // Adding a check to see if the line is an Instruction Line
 
+uint8_t l2_psel;
+uint8_t follower_irrip;
+
+inline int l2_follower_policy() {
+    return ((l2_psel) >> 7) == 0 ? 1 : 0;
+}
+
+inline int l2_role(uint32_t set) {
+    uint8_t low = set & 31;
+    uint8_t high = (set >> 5) & 31;
+
+    if (low == high) return 1; // Classify them as I-RRIP set
+    if (low == ((~high) & 31)) return 2; // Classify them as RRIP set
+    return 0; // It is now a follower set
+}
+
+inline int l2_use_irrip(uint32_t set) {
+    uint8_t role = l2_role(set);
+
+    if (role == 1) return 1;
+    if (role == 2) return 0;
+    return l2_follower_policy();
+}
+
 // initialize replacement state
 void CACHE::l2c_initialize_replacement()
 {
     cout << "Initialize I-RRIP state for L2C" << endl;
+
+    l2_psel = 128;
 
     for (int i=0; i<L2C_SET; i++) {
         for (int j=0; j<L2C_WAY; j++) {
@@ -20,23 +46,33 @@ void CACHE::l2c_initialize_replacement()
 // find replacement victim
 uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
 {
+
+    for (int i = 0; i < L2C_WAY; i++) {
+        if (!current_set[i].valid)
+            return i;
+    }
+
+    int irrip = l2_use_irrip(set);
     // look for the maxRRPV line
     while (1)
     {
-        uint8_t instr_candidate = -1;
+        // int8_t instr_candidate = -1;
 
         for (int i=0; i<L2C_WAY; i++) {
             if (l2_rrpv[set][i] == maxRRPV) {
-                if (!l2_is_instr[set][i])
+//                 if (!irrip)
+//                     return i; // Do the RRIP part first
+//
+//                 if (!l2_is_instr[set][i])
                     return i; // Return i if it is data line
 
-                if (instr_candidate < 0)
-                    instr_candidate = i; // Remember this line in case there is no data line in set
+                // if (instr_candidate < 0)
+                //     instr_candidate = i; // Remember this line in case there is no data line in set
             }
         }
 
-        if (instr_candidate >= 0)
-            return instr_candidate; // Evict the Instruction Line if no data line is evicted
+        // if (instr_candidate >= 0)
+        //     return instr_candidate; // Evict the Instruction Line if no data line is evicted
 
         for (int i=0; i<L2C_WAY; i++)
             l2_rrpv[set][i]++;
@@ -80,17 +116,47 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
     // cout << "CPU: " << cpu << "  L2C " << setw(9) << TYPE_NAME << " set: " << setw(5) << set << " way: " << setw(2) << way;
     // cout << hex << " paddr: " << setw(12) << paddr << " ip: " << setw(8) << ip << " victim_addr: " << victim_addr << dec << endl;
 
-    // Changing the policy to be very forgiving to the Instruction Lines. Will have to test the "gradually" promoting the data line
-    if (hit)
-        if (isInstruction) {
-            l2_is_instr[set][way] = 1;
-            l2_rrpv[set][way] = 0;
-        } else if (l2_rrpv[set][way] > 0) {
-            l2_rrpv[set][way]--;
+    // PSEL Training Part
+    int is_instr = (isInstruction && (type == LOAD || type == PREFETCH)) ? 1 : 0;
+    uint8_t role = l2_role(set);
+    int irrip = l2_use_irrip(set);
+
+    if (!hit && role != 0 && (type == LOAD || type == RFO)) {
+        if (role == 1) {
+            if (l2_psel < 255) l2_psel++;
+        } else {
+            if (l2_psel > 0) l2_psel--;
         }
-    else
-        l2_is_instr[set][way] = (isInstruction) ? 1 : 0;
-        l2_rrpv[set][way] = (isInstruction) ? 0 : maxRRPV-1;  //insert with RRPV2
+    }
+
+    // Changing the policy to be very forgiving to the Instruction Lines. Will have to test the "gradually" promoting the data line
+    if (hit) {
+        // if (!irrip) {
+        //     l2_rrpv[set][way] = 0;
+        // } else if (is_instr) {
+        //     l2_is_instr[set][way] = 1;
+        //     l2_rrpv[set][way] = 0;
+        // } else if (l2_rrpv[set][way] > 0) {
+        //     l2_rrpv[set][way] = 0;
+        // }
+
+        if (is_instr)
+            l2_is_instr[set][way] = 1;
+
+        l2_rrpv[set][way] = 0;
+
+    } else {
+        l2_is_instr[set][way] = is_instr;
+        if (irrip)
+            l2_rrpv[set][way] = (is_instr) ? 1 : maxRRPV-1;
+        else
+            l2_rrpv[set][way] = maxRRPV-1;
+
+
+        if (irrip && type == WRITEBACK)
+            l2_rrpv[set][way] = maxRRPV - 1;
+    }
+
 }
 
 // use this function to print out your own stats at the end of simulation

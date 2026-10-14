@@ -91,7 +91,7 @@ void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t wa
     } else {
         l2_is_instr[set][way] = (isInstruction) ? 1 : 0;
         l2_rrpv[set][way] = (isInstruction) ? 0 : maxRRPV-1;  //insert with RRPV2
-        }
+    }
 }
 
 // use this function to print out your own stats at the end of simulation
