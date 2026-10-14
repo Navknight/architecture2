@@ -1,18 +1,517 @@
-\documentclass{article}
-\usepackage{graphicx} % Required for inserting images
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
 \usepackage{listings}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{array}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
 
-\title{CS 683 PA2 Report}
-\author{}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  columns=fullflexible,
+  showstringspaces=false
+}
+
+\title{\vspace{-1.5em}\textbf{CS683 PA-2}}
+\author{
+  \begin{tabular}{c@{\hspace{3em}}c}
+    \textbf{Abhinav Gupta} & \textbf{Dinesh Methre} \\
+    26M2135 & 23B1228 \\[1.2em]
+    \textbf{Om Dwivedi} & \textbf{Saravan Kumar} \\
+    26M2108 & 23B3922
+  \end{tabular}
+}
 \date{}
 
 \begin{document}
-
 \maketitle
+\vspace{-1.5em}
 
-\section{Data Prefetching}
-\subsection{Understanding the IP Stride Code}
-\subsection{Stride Stream Prefetching}
+\section{Past Mistakes}
+
+The previous assignment was the first assignment at IIT Bombay for half of the team, and we
+made several mistakes that we aim to rectify this time. The key lessons
+we have taken forward are:
+
+\begin{itemize}
+  \item \textbf{Prioritising the report:} In the previous assignment,
+  we spent too much time optimising the code and neglected report
+  writing.
+
+  \item \textbf{Using LaTeX:} We used Google Docs for part of the
+  previous report and only learned afterwards that reports were
+  expected to be written in LaTeX.
+
+  \item \textbf{Understanding data collection:} We used AI to help
+  write Bash and Python scripts for collecting experimental data.
+  However, we did not sufficiently inspect the available data or
+  verify the scripts' behaviour, and ended up trusting the AI too much and missing out on some easy fixes.
+
+  \item \textbf{Writing the report ourselves:} With most of our time
+  spent on implementation, we turned to AI to produce a starting point for the report. Correcting its mistakes took
+  more time than expected, and some errors still made it into the
+  final submission.
+
+  \item \textbf{AI, AI, AI:} Overall, we learned that
+  treating AI as a shortcut can create more work than it saves.
+  Although eliminating the use of AI would put the team at a disadvantage, we have minimised the use this time.
+\end{itemize}
+
+\section{Simulation Configuration}
+
+All experiments are conducted using the ChampSim simulator. The
+simulated system configuration is in
+Table~\ref{tab:config}, and the configurations used for our experiments is in Table~\ref{tab:runs}.
+
+\begin{table}[H]
+  \centering
+  \caption{Champsim Configuration}
+  \label{tab:config}
+  \begin{tabular}{@{}ll@{}}
+    \toprule
+    \textbf{Component} & \textbf{Configuration} \\
+    \midrule
+    Core       & 4\,GHz, out-of-order, 352-entry ROB \\
+    L1I        & 32\,KB, 8-way, 4 cycles, LRU \\
+    L1D        & 48\,KB, 12-way, 5 cycles, 16 MSHRs, LRU \\
+    L2C        & 512\,KB, 8-way, 15 cycles, policy per Table~\ref{tab:runs} \\
+    LLC        & 2\,MB, 16-way, 35 cycles, LRU \\
+    DRAM       & 4\,GB, 1 channel, 6400\,MT/s \\
+    Simulation & 25M warmup + 25M simulated instructions \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{table}[H]
+  \centering
+  \caption{Experiment Configurations}
+  \label{tab:runs}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Configuration} & \textbf{L1D prefetcher}
+    & \textbf{L2C replacement} \\
+    \midrule
+    Baseline                   & None & LRU \\
+    Task 1A: IP-Stride  & IP-Stride & LRU\\
+    Task 1B: SPP                & SPP  & LRU \\
+    Task 2A: I-RRIP            & None & I-RRIP \\
+    Task 2B: Dynamic I-RRIP    & None & Dynamic I-RRIP \\
+    Task 3: SPP + Dynamic I-RRIP
+                               & SPP  & Prefetch-aware Dynamic I-RRIP \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Prefetching}
+
+\subsection{Task 1A: Understanding the IP-Stride Prefetcher}
+
+The repository contains a pre-existing implementation of an IP-Stride
+prefetcher. An IP-Stride prefetcher records the last memory address
+accessed by each LOAD instruction, identified by its instruction
+pointer (IP). When the same LOAD executes again, the prefetcher
+computes the \textbf{stride} by subtracting the previous address from
+the current address. Once the same stride has been observed for a
+minimum number of consecutive accesses, the prefetcher becomes
+confident in the pattern and issues prefetch requests according to
+a configured degree and distance.
+
+\paragraph{IP-Stride in ChampSim}
+
+The default implementation of the IP-Stride prefetcher in ChampSim
+(\texttt{prefetcher/ip\_stride.l1d\_pref}) has the following
+configuration:
+
+\begin{table}[htbp]
+  \centering
+  \caption{IP-Stride configuration}
+  \label{tab:ip-stride}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    \textbf{Configuration} & \textbf{Value} & \textbf{Description} \\
+    \midrule
+    Tracker entries & 24 & Fully associative, LRU replacement \\
+    IP mask & \texttt{0xFF} & Multiple IPs may map to the same entry \\
+    Prefetch degree & 3 & Number of prefetch requests \\
+    Confidence rule & 2 equal strides & Confidence threshold \\
+    Stride unit & Cache line & 64\,B blocks \\
+    Page boundary & 4\,KB & Prefetches do not cross page boundaries \\
+    Fill level & L1 or L2 & L1 if MSHR occupancy is below 50\%; otherwise L2 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+Each tracker entry stores the masked IP, the last cache-line address
+accessed by that IP, the last observed stride, and an LRU counter.
+On every L1D load, the prefetcher operates as follows:
+
+\begin{enumerate}
+  \item \textbf{Lookup:} The IP is matched against the 24 trackers, and if it does not match the LRU tracker is evicted and the new IP is tracked
+
+  \item \textbf{Stride computation:} On a hit, the stride is computed
+  as the difference between the current and previous cache-line
+  addresses. If the same cache line is accessed again (stride = 0),
+  the access is ignored.
+
+  \item \textbf{Prefetch:} If the stride matches the previously
+  recorded stride, prefetches are issued for
+  $\text{addr} + k \cdot \text{stride}$, where $k = 1, 2, 3$.
+  Prefetching stops at the first address outside the current 4\,KB
+  page.
+
+  \item \textbf{Update:} The last address and stride are stored,
+  and the entry becomes the most recently used.
+\end{enumerate}
+
+\paragraph{Limitations}
+
+This design only captures \emph{uniform} strides. For a repeating
+non-uniform pattern such as $(+1, +2, +2, +2, +3)^n$, the IP-Stride
+prefetcher cannot learn the complete pattern. It may become confident
+in a stride of $+2$ even though the access pattern subsequently changes.
+Additionally, the prefetch degree is fixed regardless of how useful
+the prefetches are, and masking the IP to 8 bits allows unrelated
+loads to alias to the same tracker.
+
+
+
+\subsection{Task 1B: Stride Pattern Prefetcher (SPP)}
+
+  The Stride Pattern Prefetcher (SPP) is designed to overcome the
+  limitations of the IP-Stride prefetcher. According to the assignment,
+  it must:
+
+  \begin{itemize}
+    \item \textbf{Track patterns per IP:} maintain a table that records
+    the access behaviour of each load instruction.
+    \item \textbf{Detect uniform strides:} constant strides such as
+    $A, A{+}2, A{+}4, A{+}6, \ldots$
+    \item \textbf{Detect non-uniform strides:} repeating multi-stride
+    patterns such as $A, A{+}1, A{+}3, A{+}5, A{+}7, A{+}10, A{+}11,
+    \ldots$, generated by the stride sequence $(+1, +2, +2, +2, +3)^n$.
+    \item \textbf{Signature:} represents the sequence of recently
+    observed strides by a signature that maps to the next expected stride.
+    \item \textbf{Support a degree greater than 1.}
+    \item \textbf{Throttle by accuracy:} measure the usefulness of
+    prefetches and scale the degree accordingly to avoid cache pollution.
+    \item \textbf{Stay within the page:} never prefetch across a 4\,KB
+    page boundary.
+  \end{itemize}
+
+  \subsubsection{Design}
+
+  Our SPP consists of three structures: an \textbf{IP table}, a
+  \textbf{pattern table}, and an \textbf{accuracy filter}.
+
+  \paragraph{IP table.} A 256-entry direct-mapped table indexed by the
+  low 8 bits of the IP. The remaining IP bits are stored as a tag, so
+  unrelated loads that share the low 8 bits do not corrupt each other's
+  history (unlike the \texttt{0xFF} mask of IP-Stride). Each entry stores
+  the last cache line accessed by the IP, its stride, a 2-bit uniform
+  confidence counter, and an 8-bit signature of its recent strides.
+
+  \paragraph{Pattern table.} A 256-entry table indexed by the signature.
+  Each entry stores the stride that follows that signature (the predicted stride),
+  together with a 2-bit confidence counter. The table is shared by all
+  IPs, so loops with the same access pattern train the same entries.
+
+  \paragraph{Signature.} After every stride $s$, the signature of the IP
+  is updated as
+  \[
+    \mathit{sig} \leftarrow \big((\mathit{sig} \ll 3) \oplus
+    (s \mathbin{\&} \texttt{0x7F})\big) \mathbin{\&} \texttt{0xFF}.
+  \]
+  Shifting by 3 bits and keeping 8 bits means that each stride influences
+  the signature for roughly three subsequent strides, so the signature
+  summarises the last three strides. For the pattern
+  $(+1, +2, +2, +2, +3)^n$, the signature settles into a cycle of five
+  distinct values,
+  \[
+    82 \xrightarrow{+2} 146 \xrightarrow{+3} 147 \xrightarrow{+1} 153
+    \xrightarrow{+2} 202 \xrightarrow{+2} 82,
+  \]
+  one per position in the pattern, so every signature maps to exactly one
+  next stride.
+
+  \paragraph{Training.} On every L1D load, the stride is computed as the
+  difference between the current and the previous cache line of the IP.
+  A stride of 0 is ignored, and a stride larger than 63 lines (outside
+  the page) resets the IP's history. Otherwise:
+  \begin{enumerate}
+    \item The \emph{uniform confidence} is incremented if the stride
+    matches the stored stride, and decremented otherwise. The stored
+    stride is only replaced once the confidence has reached 0, so a
+    single irregular access does not break a stream.
+    \item The pattern table entry of the \emph{previous} signature is
+    trained with the observed stride using the same saturating-counter
+    rule.
+    \item The signature is updated with the new stride.
+  \end{enumerate}
+
+ \paragraph{Prefetching.} On every access, the prefetcher decides how to
+  generate the strides of the prefetch requests.
+  If the uniform confidence is at least 2, the prefetcher uses
+  \textbf{uniform mode} and issues $\text{line} + k \cdot \text{stride}$
+  for $k = 1 \ldots \text{degree}$. Otherwise it falls back to
+  \textbf{pattern mode}: it reads the predicted stride from the pattern
+  table, advances the predicted line, updates a copy of the signature with
+  the predicted stride, and repeats. This allows the prefetcher to lookahead several steps
+  of a non-uniform pattern, for example, at line $A$ with signature 147 and
+  degree 4, it issues $A{+}1, A{+}3, A{+}5, A{+}7$. Pattern mode stops as
+  soon as a pattern table entry has zero confidence. In both modes,
+  prefetching stops at the first line outside the current 4\,KB page. As
+  in IP-Stride, a line is filled into L1 if the MSHR is less than half
+  full, and into L2 otherwise.
+
+  \paragraph{Accuracy-based throttling.} Every issued prefetch is
+  recorded in a 64-entry filter indexed by $\text{line} \bmod 64$. When a
+  demand load hits a line present in the filter, the prefetch is counted
+  as useful and the entry is cleared. After every 256 issued prefetches
+  (one epoch), the accuracy of the epoch is computed and the degree is
+  set according to Table~\ref{tab:throttle}.
+
+  \begin{table}[H]
+    \centering
+    \caption{Accuracy-based degree selection}
+    \label{tab:throttle}
+    \begin{tabular}{@{}cc@{}}
+      \toprule
+      \textbf{Epoch accuracy} & \textbf{Degree} \\
+      \midrule
+      $\geq 75\%$   & 8 \\
+      $50$--$75\%$  & 6 \\
+      $25$--$50\%$  & 3 \\
+      $< 25\%$      & 2 \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+
+  \subsubsection{Results}
+
+  Table~\ref{tab:spp-results} compares IP-Stride and SPP against the
+  baseline without an L1D prefetcher. Speedup is the IPC relative to the
+  baseline, accuracy is taken from the ChampSim statistics, and coverage
+  is computed as
+  \[
+    \text{Coverage} =
+    \frac{\text{L1D load misses}_{\text{baseline}} -
+          \text{L1D load misses}_{\text{prefetcher}}}
+         {\text{L1D load misses}_{\text{baseline}}}.
+  \]
+
+  \begin{table}[htbp]
+    \centering
+    \caption{IP-Stride and SPP results}
+    \label{tab:spp-results}
+    \begin{tabular}{@{}llccccc@{}}
+      \toprule
+      \textbf{Trace} & \textbf{Prefetcher} & \textbf{IPC} &
+      \textbf{Speedup} & \textbf{L1D Load MPKI} &
+      \textbf{Accuracy (\%)} & \textbf{Coverage (\%)} \\
+      \midrule
+      \multirow{3}{*}{Trace 1}
+        & None      & 0.2319 & 1.0000 & 10.68 & --    & --    \\
+        & IP-Stride & 0.2328 & 1.0040 & 10.12 & 52.68 & 5.23  \\
+        & SPP       & 0.2341 & 1.0093 & 9.38  & 48.00 & 12.15 \\
+      \midrule
+      \multirow{3}{*}{Trace 2}
+        & None      & 0.2513 & 1.0000 & 13.54 & --    & --    \\
+        & IP-Stride & 0.2511 & 0.9992 & 13.44 & 38.23 & 0.74  \\
+        & SPP       & 0.2551 & 1.0149 & 12.86 & 43.20 & 5.02  \\
+      \midrule
+      \multirow{3}{*}{Trace 3}
+        & None      & 0.3821 & 1.0000 & 3.40  & --    & --    \\
+        & IP-Stride & 0.3830 & 1.0024 & 3.32  & 15.98 & 2.49  \\
+        & SPP       & 0.3905 & 1.0221 & 2.74  & 35.51 & 19.45 \\
+      \midrule
+      \multicolumn{2}{@{}l}{Geomean speedup}
+        & & IP-Stride: 1.0019 & & & \\
+      \multicolumn{2}{@{}l}{}
+        & & SPP: 1.0154 & & & \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+
+  \begin{figure}[H]
+    \centering
+    \pgfplotsset{
+      sppbars/.style={
+        ybar, bar width=9pt, width=0.48\textwidth, height=5cm,
+        symbolic x coords={Trace 1,Trace 2,Trace 3}, xtick=data,
+        enlarge x limits=0.25,
+        legend style={at={(0.5,-0.18)}, anchor=north,
+                      legend columns=-1, font=\footnotesize},
+        ymajorgrids, tick label style={font=\footnotesize},
+        label style={font=\footnotesize}
+      }
+    }
+    \begin{tikzpicture}
+      \begin{axis}[sppbars, ylabel={Speedup}, ymin=0.99, ymax=1.03]
+        \addplot coordinates {(Trace 1,1.0040) (Trace 2,0.9992) (Trace 3,1.0024)};
+        \addplot coordinates {(Trace 1,1.0093) (Trace 2,1.0149) (Trace 3,1.0221)};
+        \legend{IP-Stride, SPP}
+      \end{axis}
+    \end{tikzpicture}
+    \hfill
+    \begin{tikzpicture}
+      \begin{axis}[sppbars, ylabel={L1D Load MPKI}, ymin=0]
+        \addplot coordinates {(Trace 1,10.68) (Trace 2,13.54) (Trace 3,3.40)};
+        \addplot coordinates {(Trace 1,10.12) (Trace 2,13.44) (Trace 3,3.32)};
+        \addplot coordinates {(Trace 1,9.38)  (Trace 2,12.86) (Trace 3,2.74)};
+        \legend{Baseline, IP-Stride, SPP}
+      \end{axis}
+    \end{tikzpicture}
+
+    \vspace{1em}
+    \begin{tikzpicture}
+      \begin{axis}[sppbars, ylabel={Prefetch Accuracy (\%)}, ymin=0, ymax=60]
+        \addplot coordinates {(Trace 1,52.68) (Trace 2,38.23) (Trace 3,15.98)};
+        \addplot coordinates {(Trace 1,48.00) (Trace 2,43.20) (Trace 3,35.51)};
+        \legend{IP-Stride, SPP}
+      \end{axis}
+    \end{tikzpicture}
+    \hfill
+    \begin{tikzpicture}
+      \begin{axis}[sppbars, ylabel={L1D Coverage (\%)}, ymin=0, ymax=25]
+        \addplot coordinates {(Trace 1,5.23) (Trace 2,0.74) (Trace 3,2.49)};
+        \addplot coordinates {(Trace 1,12.15) (Trace 2,5.02) (Trace 3,19.45)};
+        \legend{IP-Stride, SPP}
+      \end{axis}
+    \end{tikzpicture}
+    \caption{Speedup, L1D load MPKI, prefetch accuracy and coverage of
+    IP-Stride and SPP}
+    \label{fig:spp-results}
+  \end{figure}
+
+  SPP outperforms IP-Stride on every trace, with a geomean speedup of
+  1.54\% compared to 0.19\%. The gain comes mainly from coverage: SPP
+  removes 5--19\% of the baseline L1D load misses, 2--8$\times$ more than
+  IP-Stride. Accuracy is comparable on Trace~1 and much higher on
+  Trace~3, where IP-Stride's fixed degree issues many useless prefetches.
+  Over the whole run, both modes are used: pattern mode issues
+  1.07M/0.97M/1.05M prefetches and uniform mode 0.66M/0.24M/0.35M on
+  Traces 1/2/3.
+
+  The absolute speedups are modest because these traces are dominated by
+  irregular accesses. Profiling the L1D misses per IP showed that misses
+  are spread across 7k--23k distinct IPs, and most of the top missing IPs
+  make jumps larger than a page, which no IP-based stride prefetcher can
+  predict.
+
+  \subsubsection{Design Exploration}
+
+  Starting from an initial design (64-entry IP table, pattern confidence
+  threshold of 2, degrees 6/4/2/1), we changed one parameter at a time and
+  kept a change only if it improved the speedup. Table~\ref{tab:explore}
+  shows the speedup after each step.
+
+  \begin{table}[H]
+    \centering
+    \caption{Speedup during design exploration}
+    \label{tab:explore}
+    \begin{tabular}{@{}lccc@{}}
+      \toprule
+      \textbf{Design} & \textbf{Trace 1} & \textbf{Trace 2} &
+      \textbf{Trace 3} \\
+      \midrule
+      \multicolumn{4}{@{}l}{\emph{Accepted changes}} \\
+      Initial design                               & 1.0065 & 1.0050 & 1.0106 \\
+      + IP table 64 $\rightarrow$ 256 entries      & 1.0080 & 1.0109 & 1.0134 \\
+      + Pattern confidence threshold 2 $\rightarrow$ 1 & 1.0090 & 1.0130 & 1.0158 \\
+      + Degrees 6/4/2/1 $\rightarrow$ 8/6/3/2      & 1.0091 & 1.0147 & 1.0203 \\
+      + Own accuracy filter, stride hysteresis (final) & \textbf{1.0093} & \textbf{1.0149} & \textbf{1.0221} \\
+      \midrule
+      \multicolumn{4}{@{}l}{\emph{Rejected changes}} \\
+      Prefetch distance of 2 (vs.\ initial)        & 1.0040 & 1.0027 & 1.0077 \\
+      10-bit signature (vs.\ initial)              & 1.0067 & 1.0047 & 1.0108 \\
+      IP table 1024 entries (vs.\ degrees step)    & 1.0086 & 1.0157 & 1.0223 \\
+      Filter for duplicate prefetches (vs.\ degrees step) & 1.0088 & 1.0141 & 1.0195 \\
+      IP bits in pattern table index (vs.\ degrees step)  & 1.0073 & 1.0131 & 1.0185 \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+
+  A 1024-entry IP table gave mixed results ($-0.05\%$ to $+0.2\%$) for
+  four times the storage, so we kept 256 entries. Increasing the
+  prefetch distance made prefetches cross the page boundary more often
+  and reduced coverage.
+
+  \subsubsection{Storage Overhead}
+
+  Table~\ref{tab:storage} lists the number of bits each field needs to
+  hold every value our implementation can store. Addresses are 64 bits
+  wide and cache lines are 64\,B, so a cache-line address has 58 bits.
+
+  \begin{table}[H]
+    \centering
+    \caption{Storage overhead of SPP}
+    \label{tab:storage}
+    \begin{tabular}{@{}llrl@{}}
+      \toprule
+      \textbf{Structure} & \textbf{Field} & \textbf{Bits} &
+      \textbf{Reason} \\
+      \midrule
+      \multirow{6}{*}{IP table entry}
+        & Tag            & 56  & 64-bit IP minus 8 index bits \\
+        & Last line      & 58  & 64-bit address minus 6 offset bits \\
+        & Stride         & 7   & $-63 \ldots +63$ \\
+        & Confidence     & 2   & $0 \ldots 3$ \\
+        & Signature      & 8   & $0 \ldots 255$ \\
+        & \textbf{Total} & \textbf{131} & \\
+      \midrule
+      \multirow{3}{*}{Pattern table entry}
+        & Stride         & 7   & $-63 \ldots +63$ \\
+        & Confidence     & 2   & $0 \ldots 3$ \\
+        & \textbf{Total} & \textbf{9} & \\
+      \midrule
+      Filter entry
+        & Line tag       & 52  & 58-bit line minus 6 index bits \\
+      \midrule
+      \multirow{3}{*}{Global}
+        & Degree         & 4   & $\{2, 3, 6, 8\}$ \\
+        & Issued counter & 9   & up to 263 per epoch \\
+        & Useful counter & 9   & up to 263 per epoch \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+
+  \begin{align*}
+    \text{IP table}      &= 256 \times 131 = 33{,}536 \text{ bits} \\
+    \text{Pattern table} &= 256 \times 9   = 2{,}304 \text{ bits} \\
+    \text{Filter}        &= 64  \times 52  = 3{,}328 \text{ bits} \\
+    \text{Global}        &= 4 + 9 + 9      = 22 \text{ bits} \\
+    \textbf{Total}       &= \mathbf{39{,}190 \text{ bits}
+                            \approx 4.78\,KB}
+  \end{align*}
+
+  Most of the storage is spent on the full IP tag and last-line address.
+  Storing a partial tag and only the low bits of the last line would
+  reduce the overhead to roughly 1.5\,KB, at the cost of occasional
+  aliasing.
+
+  \subsubsection{Choice of Throttling Thresholds and Degrees}
+
+  \paragraph{Thresholds.} We divide the accuracy range into four equal
+  bands at 25\%, 50\% and 75\%. Equal bands are simple to compute in
+  hardware and give each degree level an equally wide range. The
+  throttle is evaluated once every 256 issued prefetches; we also tried
+  epochs of 64 and 1024 prefetches, and the speedup changed by less than
+  0.05\%, so the epoch length is not critical.
+
+  \paragraph{Degrees.} The degrees were chosen experimentally. Replacing
+  the initial degrees 6/4/2/1 with 8/6/3/2 improved the speedup on all
+  three traces (Table~\ref{tab:explore}). The traces are memory-bound
+  (L2 miss rate of about 59\%), so covering more misses gains more than
+  the extra pollution costs. The minimum degree is 2 rather than 1
+  because the assignment requires a degree greater than 1, and even in
+  low-accuracy phases a second prefetch still helps hide memory latency.
 
 \section{Cache Replacement Policy}
 \subsection{Task 2A: Instruction-Conscious L2 Replacement Policy (I-RRIP)}
@@ -20,13 +519,13 @@ This is a pretty simple policy change, designed to prioritize Instruction Lines 
 \subsubsection{Changes made (with a basic reasoning)}
 To implement this policy, we first made it so that we can expose the Cache to the isInstruction byte, which tells us whether the line is from an Instruction Line or not. Based on this, there are mainly three changes made to the three parts of the policy. They are:
 \begin{enumerate}
-\item \textbf{Insertion: } Normally, when an Cache line is brought into the CPU, we give it the RRPV vlue of 2. This makes it so that it isn't fully treated as a new block, but still gives it tyime before putting the line in danger of eviction. The change done here was to be very partial to the Instruction Lines by giving them the RRPV value of 0, giving them ample amount of time to sit in the Cache.
+\item \textbf{Insertion: } Normally, when an Cache line is brought into the CPU, we give it the RRPV vlue of 2. This makes it so that it isn't fully treated as a new block, but still gives it time before putting the line in danger of eviction. The change done here was to be very partial to the Instruction Lines by giving them the RRPV value of 0, giving them ample amount of time to sit in the Cache.
 \item \textbf{Promotion: } To change the behaviour to be favorable to the Instructions, we change the promotion policy to change the Instruction hit RRPV value to 0 while a hit to a Data Line only causes it to go down by 1.
 \item \textbf{Eviction: } In the Eviction Policy, we make it so that we check all the ways for the maxRRPV. And on this, we once again try to be forgiving to the Instruction Lines by checking if there are any Data Lines with the maxRRPV. If true, we evict them first. If there are no such Data Lines, we then evict the Instruction Lines.
 \end{enumerate}
 
 \subsubsection{Results}
-For this, we have decided to run the file against the 3 traces against the baseline LRU and the Baseline RRIP Instruction Policy. To purely see the performance of the L2 Policy, we have disabled the prefetcher, leading to a very clean and elegant souonding binaries by the name of:
+For this, we have decided to run the file against the 3 traces against the baseline LRU and the Baseline RRIP Instruction Policy. To purely see the performance of the L2 Policy, we have disabled the prefetcher, leading to very clean and elegant sounding binaries such as:
 \begin{enumerate}
 \item ./bin/hashed\_perceptron-no-no-no-no-no-no-no-lru-lru-lru-irrip-lru-lru-lru-lru-1core-task2a\_no\_prefetch
 \item /bin/hashed\_perceptron-no-no-no-no-no-no-no-lru-lru-lru-lru-lru-lru-lru-lru-1core-lru\_no\_prefetch
@@ -36,12 +535,191 @@ For this, we have decided to run the file against the 3 traces against the basel
 
 The Graphs look like the following:
 
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2a/Task2A_IPC_Raw.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2a/Task2A_IPC_Normalized.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2a/Task2A_MPKI.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2a/Task2A_MPKI_Instruction.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2a/Task2A_MPKI_Data.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+The tabulated values are:
+
+\begin{table}[H]
+\centering
+\caption{Normalized with respect to LRU for Trace 1.}
+\begin{tabular}{llrrrrr}
+\hline
+Trace & Policy & IPC & IPC Norm & MPKI & Data MPKI & Instr MPKI \\
+\hline
+Trace 1 & LRU   & 0.232204 & 1.000000 & 17.73022 & 7.34592 & 10.38430 \\
+Trace 1 & RRIP  & 0.232075 & 0.999444 & 17.61556 & 7.07956 & 10.53600 \\
+Trace 1 & IRRIP & 0.231919 & 0.998773 & 17.77196 & 7.89972 & 9.87224 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Normalized with respect to LRU for Trace 2.}
+\begin{tabular}{llrrrrr}
+\hline
+Trace & Policy & IPC & IPC Norm & MPKI & Data MPKI & Instr MPKI \\
+\hline
+Trace 2 & LRU   & 0.251130 & 1.000000 & 27.92332 & 8.53252 & 19.39080 \\
+Trace 2 & RRIP  & 0.251900 & 1.003066 & 26.29574 & 7.96284 & 18.33290 \\
+Trace 2 & IRRIP & 0.256176 & 1.020093 & 23.48624 & 9.33364 & 14.15260 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Normalized with respect to LRU for Trace 3.}
+\begin{tabular}{llrrrrr}
+\hline
+Trace & Policy & IPC & IPC Norm & MPKI & Data MPKI & Instr MPKI \\
+\hline
+Trace 3 & LRU   & 0.382061 & 1.000000 & 3.95904  & 2.83320 & 1.12584 \\
+Trace 3 & RRIP  & 0.381743 & 0.999168 & 4.04324  & 2.84700 & 1.19624 \\
+Trace 3 & IRRIP & 0.382010 & 0.999867 & 3.89564  & 2.89248 & 1.00316 \\
+\hline
+\end{tabular}
+\end{table}
 
 \subsubsection{Off-Topic Discussion}
 Looking at the execution of these 3 traces, it looks like 2 is a very Instruction Heavy Workload, suspiciously similar to the kind of application listed as a use case, as the Overall MPKI of this trace seems to be lesser than others even when Data Lines is at a disadvantage.
 
 \subsection{Dynamic I-RRIP}
+\subsubsection{Reasoning and basic working}
+As mentioned in the Assignment document, blindly trying to optimize for only minimizing the Instruction MPKIs is not a good Idea, as we also have to be impartial towards Data Misses. So to satisfy this, Dynamic I-RRIP Policy was implemented. In this policy, we take a few of the 1024 sets, and make them the "Leader Sets". In these leader sets, half of them follow the RRIP and the other half follow the I-RRIP policy. Any misses caused in these leader sets influence a global number called the PSEL counter, incrementing and decrementing them constantly. The rest of the sets have a simple policy: Look at the PSEL policy's MSB. If the MSB says 1, we follow Policy No. 1. If it says 0, we follow the other policy. In this way we can try to cater to the different misses at runtime. Now it is also important to note that these Leader Sets shouldn't be the first few ways or something. The Leader sets are chosen by hashing with the High 5 bits and the low 5 bits. This essentially ensures that the numbers are spread out.
+
+\subsubsection{Results}
+
+The Graph of the results are:
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2b/Task2B_IPC.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2b/Task2B_IPC_Normalized.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2b/Task2B_L2_MPKI.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2b/Task2B_L2_MPKI_Instruction.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.5\linewidth]{images_task2b/Task2B_L2_MPKI_Data.png}
+    % \caption{Caption}
+    \label{fig:placeholder}
+\end{figure}
+
+The tabulated values are:
+
+\begin{table}[H]
+\centering
+\caption{Normalized with respect to the LRU for Trace 1.}
+\begin{tabular}{llrrrrr}
+\hline
+Trace & Policy & IPC & IPC Norm & L2 MPKI & L2D MPKI & L2I MPKI \\
+\hline
+Trace 1 & 128 Eq   & 0.232017 & 0.999195 & 25.02890 & 7.72744 & 9.99344 \\
+Trace 1 & 144 Eq   & 0.232017 & 0.999195 & 25.02890 & 7.72744 & 9.99344 \\
+Trace 1 & 144 Uneq & 0.232022 & 0.999216 & 25.02890 & 7.72288 & 9.99448 \\
+Trace 1 & 160 Eq   & 0.232017 & 0.999195 & 25.02890 & 7.72744 & 9.99344 \\
+Trace 1 & 160 Uneq & 0.232022 & 0.999216 & 25.02890 & 7.72288 & 9.99448 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Normalized with respect to the LRU for Trace 2.}
+\begin{tabular}{llrrrrr}
+\hline
+Trace & Policy & IPC & IPC Norm & L2 MPKI & L2D MPKI & L2I MPKI \\
+\hline
+Trace 2 & 128 Eq   & 0.254853 & 1.014825 & 31.44240 & 8.68876 & 15.76220 \\
+Trace 2 & 144 Eq   & 0.255009 & 1.015446 & 31.38440 & 8.71804 & 15.62630 \\
+Trace 2 & 144 Uneq & 0.254961 & 1.015255 & 31.50170 & 8.77312 & 15.60270 \\
+Trace 2 & 160 Eq   & 0.255138 & 1.015960 & 31.37220 & 8.75168 & 15.53580 \\
+Trace 2 & 160 Uneq & 0.254923 & 1.015104 & 31.50690 & 8.76404 & 15.63120 \\
+\hline
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Normalized with respect to the LRU for Trace 3.}
+\begin{tabular}{llrrrrr}
+\hline
+Trace & Policy & IPC & IPC Norm & L2 MPKI & L2D MPKI & L2I MPKI \\
+\hline
+Trace 3 & 128 Eq   & 0.381977 & 0.999780 & 6.38592  & 2.88812 & 1.05296 \\
+Trace 3 & 144 Eq   & 0.381977 & 0.999780 & 6.38592  & 2.88812 & 1.05296 \\
+Trace 3 & 144 Uneq & 0.381952 & 0.999715 & 6.38328  & 2.88864 & 1.05424 \\
+Trace 3 & 160 Eq   & 0.381977 & 0.999780 & 6.38592  & 2.88812 & 1.05296 \\
+Trace 3 & 160 Uneq & 0.381952 & 0.999715 & 6.38328  & 2.88864 & 1.05424 \\
+\hline
+\end{tabular}
+\end{table}
+
+When trying to evaluate what is the best policy. It is not as easy to evaluate an "overall" best, as each workload suits different Policy. But if we were to pick on of the 5, and "It Depends" isn't a valid answer, then 160 with Equal PSEL Training seems to be the better policy among all of them, causing an Increase in the IPC for traces 2 and 3 both.
 
 \section{Data Prefetcher + Cache Replacement Policy}
+\subsection{Changes}
+Now incorporating both the Task 2b to take advantage of the SPP Prefetcher, we can try to improve the IPC of the program. The way is to extend by seeing if it is a Prefetch hit and changing the Data Prefetch are added at maxRRPV.
+
+\subsubsection{Results}
+
+
+\section{References}
+
 
 \end{document}
