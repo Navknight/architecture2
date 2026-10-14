@@ -1,24 +1,174 @@
 #include "cache.h"
 
+#define IT_SIZE 256
+#define SIG_BITS 8              // 2^8 signatures -> 256
+#define PT_SIZE (1 << SIG_BITS) // one row per possible signature
+#define SIG_MASK (PT_SIZE - 1)  // 0b11111111
 
-void CACHE::l1d_prefetcher_initialize() 
-{
-    std::cout << "------------------------------------------------" << std::endl;
-    std::cout << "        Stride Pattern Prefetcher (SPP)         " << std::endl;
-    std::cout << "------------------------------------------------" << std::endl;
+#define MAX_STRIDE                                                             \
+  63 // 4096/64 = 64 lines. so a jump must always be inside the page.
+#define EPOCH 256 // every EPOCH prefetches the degree is re-evaluated
+// ip table
+struct ip_entry {
+  uint64_t tag;
+  uint64_t last_cl;
+  int stride;
+  int conf;
+  int sig;
+};
+// pattern table
+struct pt_entry {
+  int stride;
+  int conf; // confidence -> 0, 1, 2, 3
+};
+
+ip_entry it[IT_SIZE];
+pt_entry pt[PT_SIZE];
+
+int degree = 4;
+
+uint64_t filt[64]; // to check if the prefetch was succesfull or not
+uint64_t epoch_useful = 0;
+uint64_t epoch_issued = 0;
+
+uint64_t uniform_pf = 0, pattern_pf = 0;
+
+// As the stride can only be +63 or -63, we only need the lower 7 bits of the
+// stride and not the whole stride so each signature records roughly the last 3
+// addresses
+int next_sig(int sig, int stride) {
+  return ((sig << 3) ^ (stride & 0x7F)) & SIG_MASK;
 }
 
-void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint8_t critical_ip_flag)
-{
-   
+void CACHE::l1d_prefetcher_initialize() {
+  std::cout << "------------------------------------------------" << std::endl;
+  std::cout << "        Stride Pattern Prefetcher (SPP)         " << std::endl;
+  std::cout << "------------------------------------------------" << std::endl;
 }
 
-void CACHE::l1d_prefetcher_cache_fill(uint64_t v_addr, uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t v_evicted_addr, uint64_t evicted_addr, uint32_t metadata_in)
-{
-	return; //metadata_in;
+void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
+                                   uint8_t cache_hit, uint8_t type,
+                                   uint8_t critical_ip_flag) {
+
+  uint64_t cl = addr >> LOG2_BLOCK_SIZE;
+  // check if the current line was prefetched in the current epoch or not
+  if (filt[cl % 64] == cl) {
+    filt[cl % 64] = 0;
+    epoch_useful++;
+  }
+
+  ip_entry *e = &it[ip % IT_SIZE];
+  uint64_t tag = ip / IT_SIZE;
+
+  if (e->tag != tag) {
+    e->tag = tag;
+    e->last_cl = cl;
+    e->stride = 0;
+    e->conf = 0;
+    e->sig = 0;
+    return;
+  }
+
+  int stride = (int)(cl - e->last_cl);
+
+  if (stride == 0)
+    return;
+
+  // current address is the "last_cl" for the next access
+  e->last_cl = cl;
+
+  // check the page boundary, and if it hits a boundary then throw away
+  // everything
+  if (stride > MAX_STRIDE || stride < -MAX_STRIDE) {
+    e->stride = 0;
+    e->conf = 0;
+    e->sig = 0;
+    return;
+  }
+
+  // uniform confidence
+  if (stride == e->stride) {
+    if (e->conf < 3)
+      e->conf++;
+  } else if (e->conf > 0) {
+    e->conf--;
+  } else {
+    e->stride = stride;
+  }
+
+  // training for pattern
+  pt_entry *p = &pt[e->sig];
+  if (p->stride == stride) {
+    if (p->conf < 3)
+      p->conf++;
+  } else if (p->conf > 0) {
+    p->conf--;
+  } else {
+    p->stride = stride;
+    p->conf = 1;
+  }
+
+  e->sig = next_sig(e->sig, stride);
+
+  if (epoch_issued >= EPOCH) {
+    uint64_t acc = epoch_useful * 100 / epoch_issued;
+    if (acc >= 75)
+      degree = 8;
+    else if (acc >= 50)
+      degree = 6;
+    else if (acc >= 25)
+      degree = 3;
+    else
+      degree = 2;
+
+    epoch_issued = 0;
+    epoch_useful = 0;
+  }
+
+  bool uniform = e->conf >= 2;
+  stride = e->stride;
+  uint64_t pf_cl = cl;
+  int sig = e->sig;
+  for (int i = 0; i < degree; i++) {
+    int s;
+    if (uniform) {
+      s = stride;
+    } else {
+
+      if (pt[sig].conf < 1)
+        break;
+      s = pt[sig].stride;
+      sig = next_sig(sig, s);
+    }
+    pf_cl += s;
+
+    if ((pf_cl << LOG2_BLOCK_SIZE) >> LOG2_PAGE_SIZE != addr >> LOG2_PAGE_SIZE)
+      break;
+
+    int fill = (MSHR.occupancy < (MSHR.SIZE >> 1)) ? FILL_L1 : FILL_L2;
+
+    if (prefetch_line(ip, addr, pf_cl << LOG2_BLOCK_SIZE, fill, 0)) {
+      epoch_issued++;
+      filt[pf_cl % 64] = pf_cl;
+      if (uniform)
+        uniform_pf++;
+      else
+        pattern_pf++;
+    }
+  }
 }
 
-void CACHE::l1d_prefetcher_final_stats()
-{
+void CACHE::l1d_prefetcher_cache_fill(uint64_t v_addr, uint64_t addr,
+                                      uint32_t set, uint32_t way,
+                                      uint8_t prefetch, uint64_t v_evicted_addr,
+                                      uint64_t evicted_addr,
+                                      uint32_t metadata_in) {
+  return;
+}
 
+void CACHE::l1d_prefetcher_final_stats() {
+
+  std::cout << "SPP uniform prefetches: " << uniform_pf
+            << " pattern prefetches: " << pattern_pf
+            << " final degree: " << degree << std::endl;
 }
