@@ -1,0 +1,47 @@
+\documentclass{article}
+\usepackage{graphicx} % Required for inserting images
+\usepackage{listings}
+
+\title{CS 683 PA2 Report}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Data Prefetching}
+\subsection{Understanding the IP Stride Code}
+\subsection{Stride Stream Prefetching}
+
+\section{Cache Replacement Policy}
+\subsection{Task 2A: Instruction-Conscious L2 Replacement Policy (I-RRIP)}
+This is a pretty simple policy change, designed to prioritize Instruction Lines in the Cache when doing the Eviction. This gives the Instruction much more time in the cache, which will help them for the required workloads (multiple shared libraries, multiple layers of kernel modules and language runtimes etc.).
+\subsubsection{Changes made (with a basic reasoning)}
+To implement this policy, we first made it so that we can expose the Cache to the isInstruction byte, which tells us whether the line is from an Instruction Line or not. Based on this, there are mainly three changes made to the three parts of the policy. They are:
+\begin{enumerate}
+\item \textbf{Insertion: } Normally, when an Cache line is brought into the CPU, we give it the RRPV vlue of 2. This makes it so that it isn't fully treated as a new block, but still gives it tyime before putting the line in danger of eviction. The change done here was to be very partial to the Instruction Lines by giving them the RRPV value of 0, giving them ample amount of time to sit in the Cache.
+\item \textbf{Promotion: } To change the behaviour to be favorable to the Instructions, we change the promotion policy to change the Instruction hit RRPV value to 0 while a hit to a Data Line only causes it to go down by 1.
+\item \textbf{Eviction: } In the Eviction Policy, we make it so that we check all the ways for the maxRRPV. And on this, we once again try to be forgiving to the Instruction Lines by checking if there are any Data Lines with the maxRRPV. If true, we evict them first. If there are no such Data Lines, we then evict the Instruction Lines.
+\end{enumerate}
+
+\subsubsection{Results}
+For this, we have decided to run the file against the 3 traces against the baseline LRU and the Baseline RRIP Instruction Policy. To purely see the performance of the L2 Policy, we have disabled the prefetcher, leading to a very clean and elegant souonding binaries by the name of:
+\begin{enumerate}
+\item ./bin/hashed\_perceptron-no-no-no-no-no-no-no-lru-lru-lru-irrip-lru-lru-lru-lru-1core-task2a\_no\_prefetch
+\item /bin/hashed\_perceptron-no-no-no-no-no-no-no-lru-lru-lru-lru-lru-lru-lru-lru-1core-lru\_no\_prefetch
+\item ./bin/hashed\_perceptron-no-no-no-no-no-no-no-lru-lru-lru-rrip-lru-lru-lru-lru-1core-rrip\_no\_prefetch
+
+\end{enumerate}
+
+The Graphs look like the following:
+
+
+\subsubsection{Off-Topic Discussion}
+Looking at the execution of these 3 traces, it looks like 2 is a very Instruction Heavy Workload, suspiciously similar to the kind of application listed as a use case, as the Overall MPKI of this trace seems to be lesser than others even when Data Lines is at a disadvantage.
+
+\subsection{Dynamic I-RRIP}
+
+\section{Data Prefetcher + Cache Replacement Policy}
+
+\end{document}

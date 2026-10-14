@@ -3,3 +3,5 @@ bin/
 obj/
 traces/
 logs/
+docs/*.synctex.gz
+docs/*.pdf
