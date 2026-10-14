@@ -1,16 +1,33 @@
 #include "cache.h"
 
 #define maxRRPV 3
+
+// 0 = plain dynamic I-RRIP (Task 2B), 1 = also prefetch-aware (Task 3)
+#define PF_AWARE 1
+
+// Set-dueling counter: 10 bits, saturating
+#define PSEL_BITS 8
+#define PSEL_MAX  ((1 << PSEL_BITS) - 1)
+// #define PSEL_MID  (1 << (PSEL_BITS - 1))
+#define PSEL_MID 160
+
+// PSEL training weights: an instruction demand miss moves PSEL more than a data demand miss
+#define INSTR_MISS_WEIGHT 1
+#define DATA_MISS_WEIGHT  1
+
 uint32_t l2_rrpv[L2C_SET][L2C_WAY];
-uint8_t l2_is_instr[L2C_SET][L2C_WAY]; // Adding a check to see if the line is an Instruction Line
+uint8_t  l2_is_instr[L2C_SET][L2C_WAY]; // line was brought in / touched by an instruction fetch
+uint8_t  l2_is_pf[L2C_SET][L2C_WAY];    // line was filled by a (data) prefetch and not yet demanded
 
-uint8_t l2_psel;
-uint8_t follower_irrip;
+uint16_t l2_psel;
 
+// PSEL low  -> I-RRIP is doing better (fewer misses in its leader sets)
+// PSEL high -> plain RRIP is doing better
 inline int l2_follower_policy() {
-    return ((l2_psel) >> 7) == 0 ? 1 : 0;
+    return (l2_psel < PSEL_MID) ? 1 : 0;
 }
 
+// 1 = I-RRIP leader, 2 = RRIP leader, 0 = follower
 inline int l2_role(uint32_t set) {
     uint8_t low = set & 31;
     uint8_t high = (set >> 5) & 31;
@@ -21,7 +38,7 @@ inline int l2_role(uint32_t set) {
 }
 
 inline int l2_use_irrip(uint32_t set) {
-    uint8_t role = l2_role(set);
+    int role = l2_role(set);
 
     if (role == 1) return 1;
     if (role == 2) return 0;
@@ -31,14 +48,15 @@ inline int l2_use_irrip(uint32_t set) {
 // initialize replacement state
 void CACHE::l2c_initialize_replacement()
 {
-    cout << "Initialize I-RRIP state for L2C" << endl;
+    cout << "Initialize Dynamic I-RRIP state for L2C" << endl;
 
-    l2_psel = 128;
+    l2_psel = PSEL_MID;
 
-    for (int i=0; i<L2C_SET; i++) {
-        for (int j=0; j<L2C_WAY; j++) {
+    for (int i = 0; i < L2C_SET; i++) {
+        for (int j = 0; j < L2C_WAY; j++) {
             l2_rrpv[i][j] = maxRRPV;
             l2_is_instr[i][j] = 0; // Set the Initial values to Zeros
+            l2_is_pf[i][j] = 0;
         }
     }
 }
@@ -46,7 +64,6 @@ void CACHE::l2c_initialize_replacement()
 // find replacement victim
 uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, const BLOCK *current_set, uint64_t ip, uint64_t full_addr, uint32_t type)
 {
-
     for (int i = 0; i < L2C_WAY; i++) {
         if (!current_set[i].valid)
             return i;
@@ -56,29 +73,29 @@ uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
     // look for the maxRRPV line
     while (1)
     {
-        // int8_t instr_candidate = -1;
+        int8_t instr_candidate = -1;
 
-        for (int i=0; i<L2C_WAY; i++) {
+        for (int i = 0; i < L2C_WAY; i++) {
             if (l2_rrpv[set][i] == maxRRPV) {
-//                 if (!irrip)
-//                     return i; // Do the RRIP part first
-//
-//                 if (!l2_is_instr[set][i])
+                if (!irrip)
+                    return i; // Do the RRIP part first
+
+                if (!l2_is_instr[set][i])
                     return i; // Return i if it is data line
 
-                // if (instr_candidate < 0)
-                //     instr_candidate = i; // Remember this line in case there is no data line in set
+                if (instr_candidate < 0)
+                    instr_candidate = i; // Remember this line in case there is no data line in set
             }
         }
 
-        // if (instr_candidate >= 0)
-        //     return instr_candidate; // Evict the Instruction Line if no data line is evicted
+        // only instruction lines are at max RRPV: evict one of them
+        if (instr_candidate >= 0)
+            return instr_candidate; // Evict the Instruction Line if no data line is evicted
 
-        for (int i=0; i<L2C_WAY; i++)
+        for (int i = 0; i < L2C_WAY; i++)
             l2_rrpv[set][i]++;
     }
 
-    // WE SHOULD NOT REACH HERE
     assert(0);
     return 0;
 }
@@ -86,77 +103,53 @@ uint32_t CACHE::l2c_find_victim(uint32_t cpu, uint64_t instr_id, uint32_t set, c
 // called on every cache hit and cache fill
 void CACHE::l2c_update_replacement_state(uint32_t cpu, uint32_t set, uint32_t way, uint64_t full_addr, uint64_t ip, uint64_t victim_addr, uint32_t type, uint8_t hit, uint8_t isInstruction)
 {
-    string TYPE_NAME;
-    if (type == LOAD)
-        TYPE_NAME = "LOAD";
-    else if (type == RFO)
-        TYPE_NAME = "RFO";
-    else if (type == PREFETCH)
-        TYPE_NAME = "PF";
-    else if (type == WRITEBACK)
-        TYPE_NAME = "WB";
-    else if (type == LOAD_TRANSLATION)
-	TYPE_NAME = "L_TN";
-    else if (type == PREFETCH_TRANSLATION)
-	TYPE_NAME = "P_TN";
-    else if (type == TRANSLATION_FROM_L1D)
-	TYPE_NAME = "TN_L1D";
-    else
-        assert(0);
-
-    if (hit)
-        TYPE_NAME += "_HIT";
-    else
-        TYPE_NAME += "_MISS";
-
     if ((type == WRITEBACK) && ip)
         assert(0);
 
-    // uncomment this line to see the L2C accesses
-    // cout << "CPU: " << cpu << "  L2C " << setw(9) << TYPE_NAME << " set: " << setw(5) << set << " way: " << setw(2) << way;
-    // cout << hex << " paddr: " << setw(12) << paddr << " ip: " << setw(8) << ip << " victim_addr: " << victim_addr << dec << endl;
+    int is_instr  = (isInstruction && (type == LOAD || type == PREFETCH)) ? 1 : 0;
+    int is_pf     = (type == PREFETCH && !is_instr) ? 1 : 0;   // data prefetch
+    int is_demand = (type == LOAD || type == RFO) ? 1 : 0;
 
-    // PSEL Training Part
-    int is_instr = (isInstruction && (type == LOAD || type == PREFETCH)) ? 1 : 0;
-    uint8_t role = l2_role(set);
+    int role  = l2_role(set);
     int irrip = l2_use_irrip(set);
 
-    if (!hit && role != 0 && (type == LOAD || type == RFO)) {
-        if (role == 1) {
-            if (l2_psel < 255) l2_psel++;
-        } else {
-            if (l2_psel > 0) l2_psel--;
-        }
+    // PSEL training: demand misses in the leader sets
+    if (!hit && role != 0 && is_demand) {
+        int w = (is_instr && type == LOAD) ? INSTR_MISS_WEIGHT : DATA_MISS_WEIGHT;
+
+        if (role == 1)
+            l2_psel = (l2_psel + w > PSEL_MAX) ? PSEL_MAX : l2_psel + w;   // I-RRIP leader missed: up
+        else
+            l2_psel = (l2_psel > w) ? l2_psel - w : 0;                     // RRIP leader missed: down
     }
 
-    // Changing the policy to be very forgiving to the Instruction Lines. Will have to test the "gradually" promoting the data line
     if (hit) {
-        // if (!irrip) {
-        //     l2_rrpv[set][way] = 0;
-        // } else if (is_instr) {
-        //     l2_is_instr[set][way] = 1;
-        //     l2_rrpv[set][way] = 0;
-        // } else if (l2_rrpv[set][way] > 0) {
-        //     l2_rrpv[set][way] = 0;
-        // }
+#if PF_AWARE
+        // A prefetch hitting an existing line is not evidence of reuse
+        if (type == PREFETCH)
+            return;
 
+        // First demand touch of a prefetched line: it was useful
+        if (is_demand)
+            l2_is_pf[set][way] = 0;
+#endif
         if (is_instr)
             l2_is_instr[set][way] = 1;
 
         l2_rrpv[set][way] = 0;
-
     } else {
         l2_is_instr[set][way] = is_instr;
-        if (irrip)
-            l2_rrpv[set][way] = (is_instr) ? 1 : maxRRPV-1;
-        else
-            l2_rrpv[set][way] = maxRRPV-1;
+        l2_is_pf[set][way] = is_pf;
 
+        uint32_t ins = maxRRPV - 1;
 
-        if (irrip && type == WRITEBACK)
-            l2_rrpv[set][way] = maxRRPV - 1;
+        if (irrip && is_instr)
+            ins = (PF_AWARE && type != LOAD) ? 1 : 0; // demand instruction fetch: 0; instruction prefetch: 1 (only when PF-aware)
+        else if (PF_AWARE && is_pf)
+            ins = maxRRPV;                  // data prefetch: distant, evicted first unless demanded
+
+        l2_rrpv[set][way] = ins;
     }
-
 }
 
 // use this function to print out your own stats at the end of simulation
