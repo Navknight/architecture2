@@ -3,3 +3,10 @@ PA2-CS683'2026.md
 Trace*.gz
 bin
 obj
+.bash_history
+bin/
+obj/
+traces/
+logs/
+docs/*.synctex.gz
+docs/*.pdf

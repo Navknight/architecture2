@@ -145,7 +145,8 @@ void CACHE::handle_fill() {
       // update replacement policy
       (this->*update_replacement_state)(
           fill_cpu, set, way, MSHR.entry[mshr_index].full_addr,
-          MSHR.entry[mshr_index].ip, 0, MSHR.entry[mshr_index].type, 0);
+          MSHR.entry[mshr_index].ip, 0, MSHR.entry[mshr_index].type, 0,
+          MSHR.entry[mshr_index].instruction);
 
       // COLLECT STATS
       sim_miss[fill_cpu][MSHR.entry[mshr_index].type]++;
@@ -564,7 +565,7 @@ void CACHE::handle_fill() {
       (this->*update_replacement_state)(
           fill_cpu, set, way, MSHR.entry[mshr_index].full_addr,
           MSHR.entry[mshr_index].ip, block[set][way].full_addr,
-          MSHR.entry[mshr_index].type, 0);
+          MSHR.entry[mshr_index].type, 0, MSHR.entry[mshr_index].instruction);
 
       // COLLECT STATS
       sim_miss[fill_cpu][MSHR.entry[mshr_index].type]++;
@@ -605,7 +606,7 @@ void CACHE::handle_fill() {
             fill_cpu, 0, way, MSHR.entry[mshr_index].full_addr,
             MSHR.entry[mshr_index].ip,
             ooo_cpu[fill_cpu].DTLB_PB.block[0][victim_way].full_addr,
-            MSHR.entry[mshr_index].type, 0);
+            MSHR.entry[mshr_index].type, 0, MSHR.entry[mshr_index].instruction);
         ooo_cpu[fill_cpu].DTLB_PB.fill_cache(0, victim_way,
                                              &MSHR.entry[mshr_index]);
       }
@@ -907,7 +908,8 @@ void CACHE::handle_writeback() {
 
       (this->*update_replacement_state)(
           writeback_cpu, set, way, block[set][way].full_addr,
-          WQ.entry[index].ip, 0, WQ.entry[index].type, 1);
+          WQ.entry[index].ip, 0, WQ.entry[index].type, 1,
+          WQ.entry[index].instruction);
 
       // COLLECT STATS
       sim_hit[writeback_cpu][WQ.entry[index].type]++;
@@ -1196,7 +1198,7 @@ void CACHE::handle_writeback() {
           (this->*update_replacement_state)(
               writeback_cpu, set, way, WQ.entry[index].full_addr,
               WQ.entry[index].ip, block[set][way].full_addr,
-              WQ.entry[index].type, 0);
+              WQ.entry[index].type, 0, WQ.entry[index].instruction);
 
           // COLLECT STATS
           sim_miss[writeback_cpu][WQ.entry[index].type]++;
@@ -1718,7 +1720,8 @@ void CACHE::handle_read() {
           ooo_cpu[read_cpu].DTLB_PB.update_replacement_state(
               read_cpu, 0, way_pb,
               ooo_cpu[read_cpu].DTLB_PB.block[0][way_pb].full_addr,
-              RQ.entry[index].ip, 0, RQ.entry[index].type, 1);
+              RQ.entry[index].ip, 0, RQ.entry[index].type, 1,
+              RQ.entry[index].instruction);
           RQ.entry[index].data =
               ooo_cpu[read_cpu].DTLB_PB.block[0][way_pb].data;
           ooo_cpu[read_cpu].DTLB_PB.pf_useful++;
@@ -1995,7 +1998,7 @@ void CACHE::handle_read() {
         // update replacement policy
         (this->*update_replacement_state)(
             read_cpu, set, way, block[set][way].full_addr, RQ.entry[index].ip,
-            0, RQ.entry[index].type, 1);
+            0, RQ.entry[index].type, 1, RQ.entry[index].instruction);
 
         // COLLECT STATS
         sim_hit[read_cpu][RQ.entry[index].type]++;
@@ -2767,7 +2770,8 @@ void CACHE::handle_prefetch() {
         // update replacement policy
         (this->*update_replacement_state)(
             prefetch_cpu, set, way, block[set][way].full_addr,
-            PQ.entry[index].ip, 0, PQ.entry[index].type, 1);
+            PQ.entry[index].ip, 0, PQ.entry[index].type, 1,
+            PQ.entry[index].instruction);
 
         // COLLECT STATS
         sim_hit[prefetch_cpu][PQ.entry[index].type]++;

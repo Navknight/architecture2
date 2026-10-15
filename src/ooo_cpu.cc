@@ -428,9 +428,9 @@ void O3_CPU::read_from_trace() {
                     IFETCH_BUFFER.entry[ifetch_buffer_index].branch_target) {
                   BTB.sim_hit[cpu][arch_instr.branch_type - 1]++;
                   BTB.sim_access[cpu][arch_instr.branch_type - 1]++;
-                  (BTB.*BTB.update_replacement_state)(cpu, btb_set, btb_way,
-                                                      arch_instr.ip,
-                                                      arch_instr.ip, 0, 0, 1);
+                  (BTB.*BTB.update_replacement_state)(
+                      cpu, btb_set, btb_way, arch_instr.ip, arch_instr.ip, 0, 0,
+                      1, 1);
                 } else {
                   BTB.sim_miss[cpu][arch_instr.branch_type - 1]++;
                   BTB.sim_access[cpu][arch_instr.branch_type - 1]++;
@@ -450,7 +450,7 @@ void O3_CPU::read_from_trace() {
                 BTB.sim_access[cpu][arch_instr.branch_type - 1]++;
                 (BTB.*BTB.update_replacement_state)(cpu, btb_set, btb_way,
                                                     arch_instr.ip,
-                                                    arch_instr.ip, 0, 0, 1);
+                                                    arch_instr.ip, 0, 0, 1, 1);
               }
             }
 
@@ -967,7 +967,7 @@ void O3_CPU::fill_btb(uint64_t trigger, uint64_t target) {
                                      trigger, trigger, 0);
     (BTB.*BTB.update_replacement_state)(cpu, btb_set, btb_way, trigger, trigger,
                                         BTB.block[btb_set][btb_way].address, 0,
-                                        0);
+                                        0, 1);
     BLOCK &entry = BTB.block[btb_set][btb_way];
     if (entry.valid == 0)
       entry.valid = 1;
