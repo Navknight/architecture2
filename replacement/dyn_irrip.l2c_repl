@@ -9,7 +9,7 @@
 #define PSEL_BITS 8
 #define PSEL_MAX  ((1 << PSEL_BITS) - 1)
 // #define PSEL_MID  (1 << (PSEL_BITS - 1))
-#define PSEL_MID 160
+#define PSEL_MID 96
 
 // PSEL training weights: an instruction demand miss moves PSEL more than a data demand miss
 #define INSTR_MISS_WEIGHT 1
